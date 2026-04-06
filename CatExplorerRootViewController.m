@@ -15,9 +15,22 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor blackColor];
+    
+    // Use the full screen including notch areas
     self.edgesForExtendedLayout = UIRectEdgeAll;
     
     [self loadConfigAndSetup];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    
+    // Ensure the webView and status bar always fill the current view bounds exactly
+    self.webView.frame = self.view.bounds;
+    
+    CGRect statusBarFrame = self.statusBarBackgroundView.frame;
+    statusBarFrame.size.width = self.view.bounds.size.width;
+    self.statusBarBackgroundView.frame = statusBarFrame;
 }
 
 - (void)loadConfigAndSetup {
@@ -55,48 +68,6 @@
     [self.webView loadRequest:request];
 }
 
-- (void)setupWebViewWithJSON:(NSDictionary *)json {
-    WKUserContentController *userContentController = [[WKUserContentController alloc] init];
-    [userContentController addScriptMessageHandler:self name:@"colorUpdate"];
-    
-    NSString *jsSource = @"(function() {"
-    "  function updateColor() {"
-    "    var color = '';"
-    "    var meta = document.querySelector('meta[name=\"theme-color\"]');"
-    "    if (meta) { color = meta.content; }"
-    "    else { color = window.getComputedStyle(document.body).backgroundColor; }"
-    "    window.webkit.messageHandlers.colorUpdate.postMessage(color);"
-    "  }"
-    "  var observer = new MutationObserver(updateColor);"
-    "  observer.observe(document.head, { childList: true, subtree: true, attributes: true });"
-    "  window.addEventListener('load', updateColor);"
-    "  updateColor();"
-    "})();";
-    
-    WKUserScript *script = [[WKUserScript alloc] initWithSource:jsSource injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
-    [userContentController addUserScript:script];
-    
-    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-    config.userContentController = userContentController;
-    config.allowsInlineMediaPlayback = YES;
-    config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
-    
-    self.webView = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:config];
-    self.webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.webView.navigationDelegate = self;
-    self.webView.UIDelegate = self;
-    
-    NSString *customUA = json[@"userAgent"];
-    if (customUA && customUA.length > 0) {
-        self.webView.customUserAgent = customUA;
-    }
-    
-    self.webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-    self.webView.allowsBackForwardNavigationGestures = YES;
-    
-    [self.view insertSubview:self.webView belowSubview:self.statusBarBackgroundView];
-}
-
 - (void)setupStatusBarView {
     CGFloat statusBarHeight = 0;
     if (@available(iOS 13.0, *)) {
@@ -124,13 +95,55 @@
         statusBarHeight = UIApplication.sharedApplication.statusBarFrame.size.height;
         #pragma clang diagnostic pop
     }
-    if (statusBarHeight == 0) statusBarHeight = 20;
+    if (statusBarHeight <= 0) statusBarHeight = 20;
 
     self.statusBarBackgroundView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, statusBarHeight)];
-    self.statusBarBackgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     self.statusBarBackgroundView.backgroundColor = [UIColor clearColor];
     self.statusBarBackgroundView.userInteractionEnabled = NO;
     [self.view addSubview:self.statusBarBackgroundView];
+}
+
+- (void)setupWebViewWithJSON:(NSDictionary *)json {
+    WKUserContentController *userContentController = [[WKUserContentController alloc] init];
+    [userContentController addScriptMessageHandler:self name:@"colorUpdate"];
+    
+    NSString *jsSource = @"(function() {"
+    "  function updateColor() {"
+    "    var color = '';"
+    "    var meta = document.querySelector('meta[name=\"theme-color\"]');"
+    "    if (meta) { color = meta.content; }"
+    "    else { color = window.getComputedStyle(document.body).backgroundColor; }"
+    "    window.webkit.messageHandlers.colorUpdate.postMessage(color);"
+    "  }"
+    "  var observer = new MutationObserver(updateColor);"
+    "  observer.observe(document.head, { childList: true, subtree: true, attributes: true });"
+    "  window.addEventListener('load', updateColor);"
+    "  updateColor();"
+    "})();";
+    
+    WKUserScript *script = [[WKUserScript alloc] initWithSource:jsSource injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
+    [userContentController addUserScript:script];
+    
+    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    config.userContentController = userContentController;
+    config.allowsInlineMediaPlayback = YES;
+    config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
+    
+    // Use view.bounds and handle resizing in viewDidLayoutSubviews
+    self.webView = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:config];
+    self.webView.navigationDelegate = self;
+    self.webView.UIDelegate = self;
+    
+    NSString *customUA = json[@"userAgent"];
+    if (customUA && customUA.length > 0) {
+        self.webView.customUserAgent = customUA;
+    }
+    
+    // Crucial for true full-screen (covers notch/home bar)
+    self.webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    self.webView.allowsBackForwardNavigationGestures = YES;
+    
+    [self.view insertSubview:self.webView belowSubview:self.statusBarBackgroundView];
 }
 
 - (void)setupRefreshControl {
@@ -158,9 +171,7 @@
     }
     if (error.code == NSURLErrorCancelled) return;
 
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Load Error" 
-                                                                   message:error.localizedDescription 
-                                                            preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Load Error" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Retry" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         [self.webView reload];
     }]];

@@ -35,5 +35,7 @@
     <false/>
     <key>UIViewControllerBasedStatusBarAppearance</key>
     <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
 </dict>
 </plist>
