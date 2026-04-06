@@ -1,6 +1,5 @@
 #import "CatExplorerRootViewController.h"
 #import <WebKit/WebKit.h>
-#import <Network/Network.h>
 
 @interface CatExplorerRootViewController () <WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate>
 @property (nonatomic, strong) WKWebView *webView;
@@ -42,27 +41,7 @@
     }
     
     [self setupStatusBarView];
-    
-    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
-    NSDictionary *proxyCfg = json[@"proxy"];
-    if (proxyCfg && [proxyCfg[@"host"] length] > 0 && [proxyCfg[@"port"] intValue] > 0) {
-        if (@available(iOS 17.0, *)) {
-            NSString *host = proxyCfg[@"host"];
-            uint16_t port = (uint16_t)[proxyCfg[@"port"] intValue];
-            nw_endpoint_t endpoint = nw_endpoint_create_host([host UTF8String], [[NSString stringWithFormat:@"%u", port] UTF8String]);
-            nw_proxy_config_t config = NULL;
-            if ([proxyCfg[@"type"] isEqualToString:@"socks5"]) {
-                config = nw_proxy_config_create_socks5(endpoint);
-            } else {
-                config = nw_proxy_config_create_http(endpoint);
-            }
-            if (config) {
-                [dataStore setProxyConfigurations:@[ (__bridge id)config ]];
-            }
-        }
-    }
-
-    [self setupWebViewWithJSON:json dataStore:dataStore];
+    [self setupWebViewWithJSON:json];
     
     if (self.pullToRefreshEnabled) {
         [self setupRefreshControl];
@@ -76,7 +55,7 @@
     [self.webView loadRequest:request];
 }
 
-- (void)setupWebViewWithJSON:(NSDictionary *)json dataStore:(WKWebsiteDataStore *)dataStore {
+- (void)setupWebViewWithJSON:(NSDictionary *)json {
     WKUserContentController *userContentController = [[WKUserContentController alloc] init];
     [userContentController addScriptMessageHandler:self name:@"colorUpdate"];
     
@@ -99,7 +78,6 @@
     
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     config.userContentController = userContentController;
-    config.websiteDataStore = dataStore;
     config.allowsInlineMediaPlayback = YES;
     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     

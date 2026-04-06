@@ -2,10 +2,5 @@
     "url": "https://www.google.com",
     "pullToRefresh": true,
     "userAgent": "",
-    "headers": {},
-    "proxy": {
-        "host": "",
-        "port": 0,
-        "type": "http"
-    }
+    "headers": {}
 }
