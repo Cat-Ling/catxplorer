@@ -1,10 +1,14 @@
 #import "CatExplorerRootViewController.h"
 #import <WebKit/WebKit.h>
+#import <Network/Network.h>
 
 @interface CatExplorerRootViewController () <WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) UIView *statusBarBackgroundView;
 @property (nonatomic, strong) NSString *baseDomain;
+@property (nonatomic, strong) UIRefreshControl *refreshControl;
+@property (nonatomic, assign) BOOL pullToRefreshEnabled;
+@property (nonatomic, strong) NSDictionary *customHeaders;
 @end
 
 @implementation CatExplorerRootViewController
@@ -14,28 +18,65 @@
     self.view.backgroundColor = [UIColor blackColor];
     self.edgesForExtendedLayout = UIRectEdgeAll;
     
-    [self setupStatusBarView];
-    [self setupWebView];
-    [self loadURLFromConfig];
+    [self loadConfigAndSetup];
 }
 
-- (void)setupStatusBarView {
-    CGFloat statusBarHeight = 0;
-    if (@available(iOS 13.0, *)) {
-        UIWindow *window = UIApplication.sharedApplication.windows.firstObject;
-        statusBarHeight = window.windowScene.statusBarManager.statusBarFrame.size.height;
-    } else {
-        statusBarHeight = UIApplication.sharedApplication.statusBarFrame.size.height;
+- (void)loadConfigAndSetup {
+    NSString *path = [[NSBundle mainBundle] pathForResource:@"config" ofType:@"json"];
+    NSDictionary *json = @{};
+    if (path) {
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     }
     
-    self.statusBarBackgroundView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, statusBarHeight)];
-    self.statusBarBackgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    self.statusBarBackgroundView.backgroundColor = [UIColor clearColor];
-    self.statusBarBackgroundView.userInteractionEnabled = NO;
-    [self.view addSubview:self.statusBarBackgroundView];
+    NSString *urlString = json[@"url"] ?: @"https://www.google.com";
+    self.pullToRefreshEnabled = json[@"pullToRefresh"] ? [json[@"pullToRefresh"] boolValue] : YES;
+    self.customHeaders = json[@"headers"] ?: @{};
+    
+    NSURL *url = [NSURL URLWithString:urlString];
+    NSString *host = url.host.lowercaseString;
+    if ([host hasPrefix:@"www."]) {
+        self.baseDomain = [host substringFromIndex:4];
+    } else {
+        self.baseDomain = host;
+    }
+    
+    [self setupStatusBarView];
+    
+    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
+    NSDictionary *proxyCfg = json[@"proxy"];
+    if (proxyCfg && [proxyCfg[@"host"] length] > 0 && [proxyCfg[@"port"] intValue] > 0) {
+        if (@available(iOS 17.0, *)) {
+            NSString *host = proxyCfg[@"host"];
+            uint16_t port = (uint16_t)[proxyCfg[@"port"] intValue];
+            nw_endpoint_t endpoint = nw_endpoint_create_host([host UTF8String], [[NSString stringWithFormat:@"%u", port] UTF8String]);
+            nw_proxy_config_t config = NULL;
+            if ([proxyCfg[@"type"] isEqualToString:@"socks5"]) {
+                config = nw_proxy_config_create_socks5(endpoint);
+            } else {
+                config = nw_proxy_config_create_http(endpoint);
+            }
+            if (config) {
+                [dataStore setProxyConfigurations:@[ (__bridge id)config ]];
+            }
+        }
+    }
+
+    [self setupWebViewWithJSON:json dataStore:dataStore];
+    
+    if (self.pullToRefreshEnabled) {
+        [self setupRefreshControl];
+    }
+    
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    [self.customHeaders enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+        [request setValue:obj forHTTPHeaderField:key];
+    }];
+    
+    [self.webView loadRequest:request];
 }
 
-- (void)setupWebView {
+- (void)setupWebViewWithJSON:(NSDictionary *)json dataStore:(WKWebsiteDataStore *)dataStore {
     WKUserContentController *userContentController = [[WKUserContentController alloc] init];
     [userContentController addScriptMessageHandler:self name:@"colorUpdate"];
     
@@ -58,6 +99,7 @@
     
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     config.userContentController = userContentController;
+    config.websiteDataStore = dataStore;
     config.allowsInlineMediaPlayback = YES;
     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     
@@ -65,39 +107,105 @@
     self.webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.webView.navigationDelegate = self;
     self.webView.UIDelegate = self;
+    
+    NSString *customUA = json[@"userAgent"];
+    if (customUA && customUA.length > 0) {
+        self.webView.customUserAgent = customUA;
+    }
+    
     self.webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     self.webView.allowsBackForwardNavigationGestures = YES;
     
     [self.view insertSubview:self.webView belowSubview:self.statusBarBackgroundView];
 }
 
-- (void)loadURLFromConfig {
-    NSString *path = [[NSBundle mainBundle] pathForResource:@"config" ofType:@"json"];
-    if (path) {
-        NSData *data = [NSData dataWithContentsOfFile:path];
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        NSString *urlString = json[@"url"];
-        if (urlString) {
-            NSURL *url = [NSURL URLWithString:urlString];
-            self.baseDomain = url.host;
-            [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
+- (void)setupStatusBarView {
+    CGFloat statusBarHeight = 0;
+    if (@available(iOS 13.0, *)) {
+        UIWindowScene *windowScene = nil;
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+                windowScene = (UIWindowScene *)scene;
+                break;
+            }
         }
+        if (!windowScene) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    windowScene = (UIWindowScene *)scene;
+                    break;
+                }
+            }
+        }
+        if (windowScene) {
+            statusBarHeight = windowScene.statusBarManager.statusBarFrame.size.height;
+        }
+    } else {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        statusBarHeight = UIApplication.sharedApplication.statusBarFrame.size.height;
+        #pragma clang diagnostic pop
     }
+    if (statusBarHeight == 0) statusBarHeight = 20;
+
+    self.statusBarBackgroundView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, statusBarHeight)];
+    self.statusBarBackgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    self.statusBarBackgroundView.backgroundColor = [UIColor clearColor];
+    self.statusBarBackgroundView.userInteractionEnabled = NO;
+    [self.view addSubview:self.statusBarBackgroundView];
+}
+
+- (void)setupRefreshControl {
+    self.refreshControl = [[UIRefreshControl alloc] init];
+    [self.refreshControl addTarget:self action:@selector(handleRefresh:) forControlEvents:UIControlEventValueChanged];
+    self.webView.scrollView.refreshControl = self.refreshControl;
+    self.webView.scrollView.alwaysBounceVertical = YES;
+}
+
+- (void)handleRefresh:(UIRefreshControl *)refreshControl {
+    [self.webView reload];
 }
 
 #pragma mark - WKNavigationDelegate
 
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if (self.pullToRefreshEnabled) {
+        [self.refreshControl endRefreshing];
+    }
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    if (self.pullToRefreshEnabled) {
+        [self.refreshControl endRefreshing];
+    }
+    if (error.code == NSURLErrorCancelled) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Load Error" 
+                                                                   message:error.localizedDescription 
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Retry" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self.webView reload];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *url = navigationAction.request.URL;
-    
-    // 1. Handle non-http(s) schemes (mailto, tel, etc.)
     if (![url.scheme isEqualToString:@"http"] && ![url.scheme isEqualToString:@"https"]) {
         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
+    
+    if ([navigationAction.request isKindOfClass:[NSMutableURLRequest class]]) {
+        NSMutableURLRequest *request = (NSMutableURLRequest *)navigationAction.request;
+        [self.customHeaders enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+            if (![request valueForHTTPHeaderField:key]) {
+                [request setValue:obj forHTTPHeaderField:key];
+            }
+        }];
+    }
 
-    // 2. Check for common download extensions
     NSArray *downloadExtensions = @[@"zip", @"pdf", @"rar", @"dmg", @"ipa", @"deb", @"exe"];
     if ([downloadExtensions containsObject:url.pathExtension.lowercaseString]) {
         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
@@ -105,11 +213,13 @@
         return;
     }
 
-    // 3. Handle external domains
-    if (self.baseDomain && url.host && ![url.host containsString:self.baseDomain]) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        decisionHandler(WKNavigationActionPolicyCancel);
-        return;
+    if (self.baseDomain && url.host) {
+        NSString *targetHost = url.host.lowercaseString;
+        if ([targetHost rangeOfString:self.baseDomain options:NSCaseInsensitiveSearch].location == NSNotFound) {
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            decisionHandler(WKNavigationActionPolicyCancel);
+            return;
+        }
     }
 
     decisionHandler(WKNavigationActionPolicyAllow);
@@ -118,12 +228,15 @@
 #pragma mark - WKUIDelegate
 
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
-    // If target="_blank", it will trigger this. Check domain here too.
     NSURL *url = navigationAction.request.URL;
-    if (self.baseDomain && url.host && ![url.host containsString:self.baseDomain]) {
+    if (self.baseDomain && url.host && [url.host.lowercaseString rangeOfString:self.baseDomain options:NSCaseInsensitiveSearch].location == NSNotFound) {
         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
     } else {
-        [webView loadRequest:navigationAction.request];
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+        [self.customHeaders enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+            [request setValue:obj forHTTPHeaderField:key];
+        }];
+        [webView loadRequest:request];
     }
     return nil;
 }
