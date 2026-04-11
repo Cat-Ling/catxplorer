@@ -10,5 +10,10 @@ CatExplorer_FILES = main.m CatExplorerAppDelegate.m CatExplorerRootViewControlle
 CatExplorer_RESOURCES_DIRS = Resources
 CatExplorer_FRAMEWORKS = UIKit CoreGraphics WebKit
 CatExplorer_CFLAGS = -fobjc-arc -I$(PWD) -Wno-unused-function -Wno-unused-variable -Wno-incompatible-pointer-types -Wno-format -Wno-error=deprecated-declarations
+CatExplorer_CODESIGN_FLAGS = -Sentitlements.plist
+
+before-all::
+	@bash ./gen_entitlements.sh
+	@bash ./gen_scripts.sh
 
 include $(THEOS_MAKE_PATH)/application.mk

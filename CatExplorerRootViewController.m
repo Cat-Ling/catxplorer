@@ -8,6 +8,8 @@
 @property (nonatomic, strong) UIRefreshControl *refreshControl;
 @property (nonatomic, assign) BOOL pullToRefreshEnabled;
 @property (nonatomic, strong) NSDictionary *customHeaders;
+@property (nonatomic, assign) CGFloat statusBarHeight;
+@property (nonatomic, strong) NSArray *scriptEntries; // Pre-loaded from scripts.json
 @end
 
 @implementation CatExplorerRootViewController
@@ -30,7 +32,12 @@
     
     CGRect statusBarFrame = self.statusBarBackgroundView.frame;
     statusBarFrame.size.width = self.view.bounds.size.width;
+    statusBarFrame.size.height = self.statusBarHeight;
     self.statusBarBackgroundView.frame = statusBarFrame;
+    
+    // Push page content below the status bar so it isn't hidden behind the overlay
+    self.webView.scrollView.contentInset = UIEdgeInsetsMake(self.statusBarHeight, 0, 0, 0);
+    self.webView.scrollView.scrollIndicatorInsets = UIEdgeInsetsMake(self.statusBarHeight, 0, 0, 0);
 }
 
 - (void)loadConfigAndSetup {
@@ -53,6 +60,7 @@
         self.baseDomain = host;
     }
     
+    [self loadScriptEntries];
     [self setupStatusBarView];
     [self setupWebViewWithJSON:json];
     
@@ -66,6 +74,84 @@
     }];
     
     [self.webView loadRequest:request];
+}
+
+#pragma mark - Script Loading (site-conditional)
+
+- (void)loadScriptEntries {
+    // scripts.json is generated at build time by gen_scripts.sh
+    // Format: [{"file":"js/domain/mode/name.js","domain":"domain","mode":"strict|wildcard"}, ...]
+    NSString *path = [[NSBundle mainBundle] pathForResource:@"scripts" ofType:@"json"];
+    if (!path) {
+        self.scriptEntries = @[];
+        return;
+    }
+    
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSArray *entries = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![entries isKindOfClass:[NSArray class]]) {
+        self.scriptEntries = @[];
+        return;
+    }
+    
+    // Pre-load all JS source code into memory so we don't hit disk on every navigation
+    NSMutableArray *loaded = [NSMutableArray array];
+    NSString *bundlePath = [NSBundle mainBundle].bundlePath;
+    
+    for (NSDictionary *entry in entries) {
+        if (![entry isKindOfClass:[NSDictionary class]]) continue;
+        
+        NSString *relPath = entry[@"file"];
+        NSString *domain  = entry[@"domain"];
+        NSString *mode    = entry[@"mode"];
+        if (!relPath || !domain || !mode) continue;
+        
+        NSString *fullPath = [bundlePath stringByAppendingPathComponent:relPath];
+        NSString *source = [NSString stringWithContentsOfFile:fullPath encoding:NSUTF8StringEncoding error:nil];
+        if (source.length > 0) {
+            [loaded addObject:@{
+                @"domain": domain,
+                @"mode":   mode,
+                @"source": source,
+                @"name":   relPath.lastPathComponent
+            }];
+            NSLog(@"[CatExplorer] Loaded script: %@ (%@ / %@)", relPath.lastPathComponent, domain, mode);
+        } else {
+            NSLog(@"[CatExplorer] Warning: could not read script at '%@'", relPath);
+        }
+    }
+    
+    self.scriptEntries = loaded;
+    NSLog(@"[CatExplorer] %lu site-conditional script(s) ready", (unsigned long)loaded.count);
+}
+
+- (void)injectScriptsForURL:(NSURL *)url inWebView:(WKWebView *)webView {
+    NSString *host = url.host.lowercaseString;
+    if (!host) return;
+    
+    for (NSDictionary *entry in self.scriptEntries) {
+        NSString *domain = entry[@"domain"];
+        NSString *mode   = entry[@"mode"];
+        BOOL match = NO;
+        
+        if ([mode isEqualToString:@"strict"]) {
+            // Exact match: host must be the domain or www.<domain>
+            match = [host isEqualToString:domain] ||
+                    [host isEqualToString:[@"www." stringByAppendingString:domain]];
+        } else if ([mode isEqualToString:@"wildcard"]) {
+            // Wildcard: host is the domain itself or any subdomain (*.domain)
+            match = [host isEqualToString:domain] ||
+                    [host hasSuffix:[@"." stringByAppendingString:domain]];
+        }
+        
+        if (match) {
+            [webView evaluateJavaScript:entry[@"source"] completionHandler:^(id result, NSError *error) {
+                if (error) {
+                    NSLog(@"[CatExplorer] Script '%@' error on %@: %@", entry[@"name"], host, error.localizedDescription);
+                }
+            }];
+        }
+    }
 }
 
 - (void)setupStatusBarView {
@@ -96,6 +182,7 @@
         #pragma clang diagnostic pop
     }
     if (statusBarHeight <= 0) statusBarHeight = 20;
+    self.statusBarHeight = statusBarHeight;
 
     self.statusBarBackgroundView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, statusBarHeight)];
     self.statusBarBackgroundView.backgroundColor = [UIColor clearColor];
@@ -107,6 +194,7 @@
     WKUserContentController *userContentController = [[WKUserContentController alloc] init];
     [userContentController addScriptMessageHandler:self name:@"colorUpdate"];
     
+    // Built-in: theme-color observer for status bar tinting
     NSString *jsSource = @"(function() {"
     "  function updateColor() {"
     "    var color = '';"
@@ -163,6 +251,9 @@
     if (self.pullToRefreshEnabled) {
         [self.refreshControl endRefreshing];
     }
+    
+    // Inject site-conditional scripts after each page load
+    [self injectScriptsForURL:webView.URL inWebView:webView];
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
@@ -180,12 +271,20 @@
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *url = navigationAction.request.URL;
+    BOOL isUserClick = (navigationAction.navigationType == WKNavigationTypeLinkActivated);
+    
+    // Non-HTTP schemes (app links like youtube://, tel:, mailto:, etc.)
+    // Only open externally if the user explicitly tapped a link — never for
+    // embedded resources, redirects, or programmatic navigations.
     if (![url.scheme isEqualToString:@"http"] && ![url.scheme isEqualToString:@"https"]) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        if (isUserClick) {
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        }
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
     
+    // Apply custom headers where possible
     if ([navigationAction.request isKindOfClass:[NSMutableURLRequest class]]) {
         NSMutableURLRequest *request = (NSMutableURLRequest *)navigationAction.request;
         [self.customHeaders enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
@@ -195,14 +294,20 @@
         }];
     }
 
-    NSArray *downloadExtensions = @[@"zip", @"pdf", @"rar", @"dmg", @"ipa", @"deb", @"exe"];
-    if ([downloadExtensions containsObject:url.pathExtension.lowercaseString]) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        decisionHandler(WKNavigationActionPolicyCancel);
-        return;
+    // Download-type extensions — only intercept user-initiated clicks
+    if (isUserClick) {
+        NSArray *downloadExtensions = @[@"zip", @"pdf", @"rar", @"dmg", @"ipa", @"deb", @"exe"];
+        if ([downloadExtensions containsObject:url.pathExtension.lowercaseString]) {
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            decisionHandler(WKNavigationActionPolicyCancel);
+            return;
+        }
     }
 
-    if (self.baseDomain && url.host) {
+    // External domain gate — ONLY for user-initiated link taps.
+    // Embedded iframes, sub-resources, JS redirects, video embeds, etc. from
+    // external domains are allowed to load normally inside the webview.
+    if (isUserClick && self.baseDomain && url.host) {
         NSString *targetHost = url.host.lowercaseString;
         if ([targetHost rangeOfString:self.baseDomain options:NSCaseInsensitiveSearch].location == NSNotFound) {
             [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
@@ -217,6 +322,7 @@
 #pragma mark - WKUIDelegate
 
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
+    // target=_blank links — always user-initiated
     NSURL *url = navigationAction.request.URL;
     if (self.baseDomain && url.host && [url.host.lowercaseString rangeOfString:self.baseDomain options:NSCaseInsensitiveSearch].location == NSNotFound) {
         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
