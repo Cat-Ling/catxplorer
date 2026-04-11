@@ -7,6 +7,7 @@
 @property (nonatomic, strong) NSString *baseDomain;
 @property (nonatomic, strong) UIRefreshControl *refreshControl;
 @property (nonatomic, assign) BOOL pullToRefreshEnabled;
+@property (nonatomic, assign) BOOL externalNavigationInDefaultBrowser;
 @property (nonatomic, strong) NSDictionary *customHeaders;
 @property (nonatomic, assign) CGFloat statusBarHeight;
 @property (nonatomic, strong) NSArray *scriptEntries; // Pre-loaded from scripts.json
@@ -50,6 +51,7 @@
     
     NSString *urlString = json[@"url"] ?: @"https://www.google.com";
     self.pullToRefreshEnabled = json[@"pullToRefresh"] ? [json[@"pullToRefresh"] boolValue] : YES;
+    self.externalNavigationInDefaultBrowser = json[@"external_navigation_in_default_browser"] ? [json[@"external_navigation_in_default_browser"] boolValue] : YES;
     self.customHeaders = json[@"headers"] ?: @{};
     
     NSURL *url = [NSURL URLWithString:urlString];
@@ -134,7 +136,10 @@
         NSString *mode   = entry[@"mode"];
         BOOL match = NO;
         
-        if ([mode isEqualToString:@"strict"]) {
+        if ([mode isEqualToString:@"all"]) {
+            // Global scripts — always inject
+            match = YES;
+        } else if ([mode isEqualToString:@"strict"]) {
             // Exact match: host must be the domain or www.<domain>
             match = [host isEqualToString:domain] ||
                     [host isEqualToString:[@"www." stringByAppendingString:domain]];
@@ -307,7 +312,7 @@
     // External domain gate — ONLY for user-initiated link taps.
     // Embedded iframes, sub-resources, JS redirects, video embeds, etc. from
     // external domains are allowed to load normally inside the webview.
-    if (isUserClick && self.baseDomain && url.host) {
+    if (isUserClick && self.baseDomain && url.host && self.externalNavigationInDefaultBrowser) {
         NSString *targetHost = url.host.lowercaseString;
         if ([targetHost rangeOfString:self.baseDomain options:NSCaseInsensitiveSearch].location == NSNotFound) {
             [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
@@ -324,7 +329,7 @@
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
     // target=_blank links — always user-initiated
     NSURL *url = navigationAction.request.URL;
-    if (self.baseDomain && url.host && [url.host.lowercaseString rangeOfString:self.baseDomain options:NSCaseInsensitiveSearch].location == NSNotFound) {
+    if (self.externalNavigationInDefaultBrowser && self.baseDomain && url.host && [url.host.lowercaseString rangeOfString:self.baseDomain options:NSCaseInsensitiveSearch].location == NSNotFound) {
         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
     } else {
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];

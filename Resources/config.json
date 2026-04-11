@@ -3,5 +3,6 @@
     "pullToRefresh": true,
     "userAgent": "",
     "headers": {},
-    "entitlements": []
+    "entitlements": [],
+    "external_navigation_in_default_browser": true
 }

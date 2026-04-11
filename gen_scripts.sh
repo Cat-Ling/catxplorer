@@ -18,9 +18,24 @@ OUTPUT="Resources/scripts.json"
 entries=()
 
 if [ -d "$JS_DIR" ]; then
+    # Global scripts: js/all/*.js — injected on every page
+    ALL_DIR="$JS_DIR/all"
+    if [ -d "$ALL_DIR" ]; then
+        for js_file in "$ALL_DIR"/*.js; do
+            [ -f "$js_file" ] || continue
+            rel_path="${js_file#Resources/}"
+            entries+=("{\"file\":\"$rel_path\",\"domain\":\"_all\",\"mode\":\"all\"}")
+            echo "[CatExplorer] Indexed: $rel_path (global / all sites)"
+        done
+    fi
+
+    # Per-domain scripts: js/<domain>/{strict,wildcard}/*.js
     for domain_dir in "$JS_DIR"/*/; do
         [ -d "$domain_dir" ] || continue
         domain=$(basename "$domain_dir")
+
+        # Skip the 'all' folder (already handled above)
+        [ "$domain" = "all" ] && continue
 
         for mode_dir in "$domain_dir"*/; do
             [ -d "$mode_dir" ] || continue
@@ -34,7 +49,6 @@ if [ -d "$JS_DIR" ]; then
 
             for js_file in "$mode_dir"*.js; do
                 [ -f "$js_file" ] || continue
-                # Path relative to Resources/ (matches bundle layout)
                 rel_path="${js_file#Resources/}"
                 entries+=("{\"file\":\"$rel_path\",\"domain\":\"$domain\",\"mode\":\"$mode\"}")
                 echo "[CatExplorer] Indexed: $rel_path ($domain / $mode)"
